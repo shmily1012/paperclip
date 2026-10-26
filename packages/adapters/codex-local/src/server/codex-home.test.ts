@@ -1039,6 +1039,48 @@ describe("evaluateCodexCredentialReadiness", () => {
     }
   });
 
+  it("approves only Paperclip-managed gateways without changing global or third-party policy", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-config-"));
+    const configPath = path.join(root, "config.toml");
+    const unmanagedConfig = [
+      'approval_policy = "never"',
+      'sandbox_mode = "workspace-write"',
+      "",
+      '[mcp_servers."third-party"]',
+      'url = "https://third-party.example/mcp"',
+      'default_tools_approval_mode = "prompt"',
+      "",
+    ].join("\n");
+    try {
+      await fs.writeFile(configPath, unmanagedConfig, "utf8");
+      await writeManagedCodexMcpConfig({
+        codexHome: root,
+        apiBaseUrl: "https://paperclip.example",
+        gateways: [{
+          name: "Paperclip projects",
+          endpointPath: "/api/mcp/project-tools",
+          bearerToken: "project-token",
+        }],
+      });
+
+      const managed = await fs.readFile(configPath, "utf8");
+      expect(managed).toContain('approval_policy = "never"');
+      expect(managed).toContain('sandbox_mode = "workspace-write"');
+      expect(managed).toContain('[mcp_servers."third-party"]\nurl = "https://third-party.example/mcp"\ndefault_tools_approval_mode = "prompt"');
+      expect(managed).toContain('[mcp_servers."paperclip-projects"]\nurl = "https://paperclip.example/api/mcp/project-tools"\ndefault_tools_approval_mode = "approve"');
+
+      await writeManagedCodexMcpConfig({
+        codexHome: root,
+        apiBaseUrl: "https://paperclip.example",
+        gateways: [],
+      });
+
+      expect(await fs.readFile(configPath, "utf8")).toBe(unmanagedConfig);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("restricts permissions on an existing managed MCP config", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-config-"));
     try {
