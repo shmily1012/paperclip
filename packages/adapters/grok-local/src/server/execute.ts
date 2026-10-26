@@ -650,11 +650,15 @@ async function executeTurn(ctx: AdapterExecutionContext): Promise<AdapterExecuti
       clearSessionOnMissingSession = false,
       isRetry = false,
     ): AdapterExecutionResult => {
-      const failed = attempt.proc.timedOut || (attempt.proc.exitCode ?? 0) !== 0;
+      const stopReason = attempt.parsed.stopReason;
+      const providerCompleted = stopReason?.replace(/[_\s-]/g, "").toLowerCase() === "endturn";
+      const providerStopped = Boolean(stopReason) && !providerCompleted;
+      const failed = attempt.proc.timedOut || (attempt.proc.exitCode ?? 0) !== 0 || providerStopped;
       const parsedError = typeof attempt.parsed.errorMessage === "string" ? attempt.parsed.errorMessage.trim() : "";
       const stderrLine = firstNonEmptyLine(attempt.proc.stderr);
       const fallbackErrorMessage =
         parsedError ||
+        (providerStopped ? `Grok stopped before completing the turn (${stopReason})` : "") ||
         stderrLine ||
         `Grok exited with code ${attempt.proc.exitCode ?? -1}`;
 
@@ -681,6 +685,7 @@ async function executeTurn(ctx: AdapterExecutionContext): Promise<AdapterExecuti
         signal: attempt.proc.signal,
         timedOut: attempt.proc.timedOut,
         errorMessage: attempt.proc.timedOut ? `Timed out after ${timeoutSec}s` : failed ? fallbackErrorMessage : null,
+        errorCode: providerStopped ? "grok_provider_stopped" : null,
         usage: {
           inputTokens: attempt.parsed.inputTokens,
           outputTokens: attempt.parsed.outputTokens,
@@ -701,8 +706,8 @@ async function executeTurn(ctx: AdapterExecutionContext): Promise<AdapterExecuti
         // so we only surface costUsd for metered API-key billing.
         costUsd: billingType === "api" ? attempt.parsed.costUsd : null,
         resultJson: {
-          stopReason: attempt.parsed.stopReason,
-          finalResponseRecorded: attempt.parsed.stopReason === "EndTurn" && Boolean(attempt.parsed.summary?.trim()),
+          stopReason,
+          finalResponseRecorded: providerCompleted && Boolean(attempt.parsed.summary?.trim()),
           requestId: attempt.parsed.requestId,
           ...(failed ? { stderr: attempt.proc.stderr } : {}),
         },
