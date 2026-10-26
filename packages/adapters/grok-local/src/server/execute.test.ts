@@ -266,6 +266,27 @@ describe("grok_local execute", () => {
     expect(runProcessMock).toHaveBeenCalledOnce();
   });
 
+  it("keeps an acknowledged Paperclip cancellation distinct from a provider-cancelled turn", async () => {
+    const f = await cancellableContext(async () => {});
+    let finishCommand!: (result: ReturnType<typeof makeSuccessfulRunResult>) => void;
+    f.remoteExecute.mockImplementation(() => new Promise(resolve => { finishCommand = resolve; }));
+    const execution = execute(f.ctx);
+    await vi.waitFor(() => expect(f.remoteExecute).toHaveBeenCalledOnce());
+    f.controller.abort();
+    finishCommand({
+      ...makeSuccessfulRunResult(),
+      stdout: JSON.stringify({ type: "end", stopReason: "cancelled", sessionId: "sess-1" }),
+    });
+
+    expect(await execution).toMatchObject({
+      errorCode: "cancelled",
+      errorMessage: "Grok execution was cancelled",
+      resultJson: {
+        executionCancellation: { state: "acknowledged" },
+      },
+    });
+  });
+
   it("keeps ownership of the command when remote termination cannot be verified", async () => {
     const f = await cancellableContext(async () => { throw new Error("stop unverified"); });
     let finishCommand!: (result: ReturnType<typeof makeSuccessfulRunResult>) => void;
@@ -318,6 +339,43 @@ describe("grok_local execute", () => {
     expect(await execute(f.ctx)).toMatchObject({ exitCode: 0 });
     f.controller.abort();
     expect(f.ctx.stopRemoteStartup).not.toHaveBeenCalled();
+  });
+
+  it.each(["cancelled", "canceled", "interrupted", "max_turns"])(
+    "reports provider stop reason %s as a failed turn even when Grok exits zero",
+    async (stopReason) => {
+      const root = await makeTempRoot();
+      runProcessMock.mockResolvedValue({
+        ...makeSuccessfulRunResult(),
+        stdout: JSON.stringify({ type: "end", stopReason, sessionId: "sess-1", requestId: "req-1" }),
+      });
+
+      expect(await execute(await makeCtx(`provider-stop-${stopReason}`, root))).toMatchObject({
+        exitCode: 0,
+        errorCode: "grok_provider_stopped",
+        errorMessage: `Grok stopped before completing the turn (${stopReason})`,
+        resultJson: { stopReason, finalResponseRecorded: false },
+      });
+    },
+  );
+
+  it.each(["EndTurn", "end_turn"])("accepts completed provider stop reason %s", async (stopReason) => {
+    const root = await makeTempRoot();
+    runProcessMock.mockResolvedValue({
+      ...makeSuccessfulRunResult(),
+      stdout: [
+        JSON.stringify({ type: "text", data: "done" }),
+        JSON.stringify({ type: "end", stopReason, sessionId: "sess-1", requestId: "req-1" }),
+      ].join("\n"),
+    });
+
+    expect(await execute(await makeCtx(`provider-complete-${stopReason}`, root))).toMatchObject({
+      exitCode: 0,
+      errorCode: null,
+      errorMessage: null,
+      summary: "done",
+      resultJson: { stopReason, finalResponseRecorded: true },
+    });
   });
 
   it("stages Grok-native instructions and skills into the workspace for the run and cleans them up afterward", async () => {
